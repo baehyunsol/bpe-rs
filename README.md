@@ -4,21 +4,7 @@
 
 You can give inputs via stdin or files. You can run it in parallel!
 
----
+## TODO
 
-TODO
-
-impl file/dir compression using BPE
-
-multi-threading: synchronization between threads would be too complicated...
-how about this?
-
-0. the main thread allocates corpus to each thread
-1. each thread constructs their own dictionary just simply calling `construct_dictionary`
-2. the main thread joins the dictionary
-  - words with a lot of appearance are chosen
-  - other words become `<UNK>`
-
----
-
-TODO: tokenizer (from dictionary)
+- Parallel worker
+- tokenizer
