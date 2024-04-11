@@ -15,6 +15,17 @@ pub struct DictionaryConfig {
 
     /// It's ignored if you're constructing a dictionary from raw input.
     pub dir_option: DirOption,
+
+    /// It's ignored if you're constructing a dictionary from raw input.
+    /// If it's None, it chooses the best number.
+    pub parallel_worker_count: Option<usize>,
+
+    /// Path to the log file
+    /// It truncates the old file if exists
+    pub write_log_at: Option<String>,
+
+    // TODO: it only works at parallel mode, i have to implement one for single-threaded mode
+    pub dump_result_at: Option<String>,
 }
 
 impl DictionaryConfig {
@@ -65,6 +76,24 @@ impl DictionaryConfig {
 
         self
     }
+
+    pub fn set_log_file(&mut self, log_file: Option<String>) -> &mut Self {
+        self.write_log_at = log_file;
+
+        self
+    }
+
+    pub fn set_dump_file(&mut self, dump_file: Option<String>) -> &mut Self {
+        self.dump_result_at = dump_file;
+
+        self
+    }
+
+    pub fn set_worker_count(&mut self, worker_count: Option<usize>) -> &mut Self {
+        self.parallel_worker_count = worker_count;
+
+        self
+    }
 }
 
 impl Default for DictionaryConfig {
@@ -75,6 +104,9 @@ impl Default for DictionaryConfig {
             minimum_appearance: Some(3),
             ultimate_separator: None,
             dir_option: DirOption::default(),
+            parallel_worker_count: None,
+            write_log_at: None,
+            dump_result_at: None,
         }
     }
 }

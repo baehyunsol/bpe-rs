@@ -1,7 +1,13 @@
 use crate::dictionary::{Dictionary, DictionaryConfig};
-use crate::files::{FileError, extension, file_size, merge_files, read_dir};
+use crate::files::{FileError, WriteMode, extension, file_size, read_dir, write_string};
+use crate::log::{initialize_log_file, write_log};
+use crate::multi::{MessageFromMain, MessageToMain, init_channels};
+use crate::utils::prettify_file_size;
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::TryRecvError;
+use std::thread::sleep;
+use std::time::Duration;
 
 #[cfg(test)]
 mod tests;
@@ -66,16 +72,30 @@ pub fn units_to_bytes(
     result
 }
 
-/// single-threaded version
-pub fn construct_dictionary_from_dir(
-    config: DictionaryConfig,
-) -> Result<Dictionary, FileError> {
+pub fn construct_dictionary_from_dir(config: DictionaryConfig) -> Result<Dictionary, FileError> {
+    if let Some(path) = &config.write_log_at {
+        initialize_log_file(path, true).unwrap();
+    }
+
+    write_log(
+        config.write_log_at.clone(),
+        "master",
+        "Hello from master!",
+    );
+
+    let channels = init_channels(
+        config.parallel_worker_count.unwrap_or_else(
+            || std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).max(1)
+        ),
+        &config,
+    );
+
     let files = read_dir(&config.dir_option.path)?;
     let ext_to_see = Some(config.dir_option.ext.clone());
 
     let mut files_with_sizes = files.iter().filter(
         |file| match (extension(file), file_size(file)) {
-            (Ok(ext), Ok(size)) if ext == ext_to_see => true,
+            (Ok(ext), Ok(_size)) if ext == ext_to_see => true,
             _ => false,
         }
     ).map(
@@ -84,42 +104,120 @@ pub fn construct_dictionary_from_dir(
 
     files_with_sizes.sort_by_key(|(_, size)| *size);
 
-    let mut dictionary = Dictionary::empty();
+    write_log(
+        config.write_log_at.clone(),
+        "master",
+        &format!(
+            "finished sorting files: got {} files to see (total size {})",
+            files_with_sizes.len(),
+            prettify_file_size(files_with_sizes.iter().map(|(_, size)| *size).sum::<u64>()),
+        ),
+    );
+
+    let mut worker_index = 0;
+    let mut done = 0;
+    let mut file_index = 0;
 
     loop {
         let mut files_to_read = vec![];
         let mut curr_chunk_size = 0;
 
         // TODO: divide big files
-        while curr_chunk_size < config.dir_option.file_chunk_size && !files_with_sizes.is_empty() {
-            files_to_read.push(files_with_sizes[0].0.clone());
-            curr_chunk_size += files_with_sizes[0].1 as usize;
-
-            // It's O(n^2), but wouldn't be a bottleneck
-            files_with_sizes = files_with_sizes[1..].to_vec();
+        while curr_chunk_size < config.dir_option.file_chunk_size && file_index < files_with_sizes.len() {
+            files_to_read.push(files_with_sizes[file_index].0.clone());
+            curr_chunk_size += files_with_sizes[file_index].1 as usize;
+            file_index += 1;
         }
 
-        // TODO: make it parallel
-        // TODO: 그냥 parallel version만 남기고 이건 버리셈
-        // It's very easy to make it parallel: send `files_to_read` to each thread and receive `new_dictionary`
-        // from each thread
-        let bytes = merge_files(files_to_read, config.dir_option.file_separator);
-        let new_dictionary = construct_dictionary(&bytes, config.clone());
+        write_log(
+            config.write_log_at.clone(),
+            "master",
+            &format!(
+                "gave jobs to a worker: {} files (total size {})",
+                files_to_read.len(),
+                prettify_file_size(curr_chunk_size as u64),
+            ),
+        );
 
-        dictionary.merge(&new_dictionary);
+        channels[worker_index % channels.len()].send(
+            MessageFromMain::ReadTheseFiles(files_to_read)
+        ).unwrap();
 
-        if files_with_sizes.is_empty() {
+        if file_index == files_with_sizes.len() {
+            break;
+        }
+
+        worker_index += 1;
+    }
+
+    let mut result = Dictionary::empty();
+
+    loop {
+        let mut has_update = false;
+
+        for channel in channels.iter() {
+            match channel.try_recv() {
+                Ok(msg) => match msg {
+                    MessageToMain::NewDictionary(dictionary) => {
+                        has_update = true;
+                        result.merge(&dictionary);
+                    },
+                    MessageToMain::Done => {
+                        done += 1;
+                    },
+                },
+                Err(TryRecvError::Disconnected) => {
+                    // TODO: what do I do here?
+                    // There are 2 cases
+                    // 1, this worker has done its job
+                    // 2, this worker has an error
+                },
+                _ => {
+                    // nop
+                },
+            }
+        }
+
+        if let Some(path) = &config.dump_result_at {
+            if has_update {
+                write_string(
+                    path,
+                    &format!("{result:?}"),
+                    WriteMode::CreateOrTruncate,
+                ).unwrap();
+
+                write_log(
+                    config.write_log_at.clone(),
+                    "master",
+                    &format!("dumped result at {path}")
+                );
+            }
+        }
+
+        sleep(Duration::from_millis(2000));
+
+        if done == channels.len() {
             break;
         }
     }
 
-    Ok(dictionary)
+    write_log(
+        config.write_log_at.clone(),
+        "master",
+        "Goodbye from master!",
+    );
+
+    Ok(result)
 }
 
 pub fn construct_dictionary(
     bytes: &[u8],
     config: DictionaryConfig,
 ) -> Dictionary {
+    if let Some(path) = &config.write_log_at {
+        initialize_log_file(path, false).unwrap();
+    }
+
     let mut unit_map = default_unit_map();
     let mut units = bytes_to_units(bytes);
 

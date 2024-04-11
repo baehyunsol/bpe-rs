@@ -80,6 +80,7 @@ impl Dictionary {
         ordered_words.sort_by_key(|(_, appearance)| usize::MAX - *appearance);
 
         // TODO: below is just a pseudo-code
+        //       I don't think this algorithm makes much sense
         // for (word, _) in ordered_words.iter() {
         //     for c in s.chunks() {
         //         if c == word {
